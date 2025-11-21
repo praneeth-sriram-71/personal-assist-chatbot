@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Message, PdfData } from './types';
 import { UPLOAD_PASSWORD, DEFAULT_PROFILE_IMAGE } from './constants';
 import { revanthBrain, fileToBase64 } from './services/geminiService';
@@ -12,22 +12,31 @@ import { speechRecognitionService } from './services/speechRecognitionService';
 // Language options for AI responses
 const LANGUAGE_OPTIONS = [
   { code: 'en-US', name: 'English' },
-  { code: 'es-ES', name: 'Spanish' },
-  { code: 'fr-FR', name: 'French' },
-  { code: 'de-DE', name: 'German' },
-  { code: 'it-IT', name: 'Italian' },
-  { code: 'pt-PT', name: 'Portuguese' },
-  { code: 'hi-IN', name: 'Hindi' },
-  { code: 'ta-IN', name: 'Tamil' },
-  { code: 'ja-JP', name: 'Japanese' },
-  { code: 'ko-KR', name: 'Korean' },
-  { code: 'zh-CN', name: 'Chinese' },
-  { code: 'ar-SA', name: 'Arabic' },
-  { code: 'ru-RU', name: 'Russian' },
-  { code: 'nl-NL', name: 'Dutch' },
-  { code: 'pl-PL', name: 'Polish' },
-  { code: 'tr-TR', name: 'Turkish' },
 ];
+
+const VOICE_PREVIEW_TEXT: Record<string, string> = {
+  en: "Hi! I'm Praneeth's assistant voice, ready to help.",
+  es: "Hola! Soy la voz del asistente de Praneeth.",
+  fr: "Salut! Je suis la voix de l'assistant de Praneeth.",
+  de: "Hallo! Ich bin die Stimme von Praneeths Assistent.",
+  it: "Ciao! Sono la voce dell'assistente di Praneeth.",
+  pt: "Ola! Eu sou a voz do assistente do Praneeth.",
+  hi: "Namaste! Main Praneeth ka assistant hoon.",
+  ta: "Vanakkam! Naan Praneeth-in assistant.",
+  ja: "Konnichiwa! Watashi wa Praneeth no assistant desu.",
+  ko: "Annyeong! Naneun Praneeth aideuimnida.",
+  zh: "Ni hao! Wo shi Praneeth de zhuli.",
+  ar: "Marhaba! Ana sawt musaeid Praneeth.",
+  ru: "Privet! Ya golos assistenta Praneetha.",
+  nl: "Hallo! Ik ben de stem van Praneeths assistent.",
+  pl: "Czesc! Jestem glosem asystenta Praneetha.",
+  tr: "Merhaba! Ben Praneeth'in asistan sesi.",
+};
+
+const getPreviewText = (langCode: string) => {
+  const prefix = langCode.split('-')[0].toLowerCase();
+  return VOICE_PREVIEW_TEXT[prefix] || VOICE_PREVIEW_TEXT.en;
+};
 
 const App: React.FC = () => {
   const [messages, setMessages] = useState<Message[]>([
@@ -47,9 +56,11 @@ const App: React.FC = () => {
   const [pdfFile, setPdfFile] = useState<PdfData | null>(null);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'processing' | 'done'>('idle');
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [activeSpeech, setActiveSpeech] = useState<{ id: string; text: string } | null>(null);
+  const [voiceStatus, setVoiceStatus] = useState<'idle' | 'starting' | 'playing'>('idle');
   const [isRecording, setIsRecording] = useState(false);
   const [responseLanguage, setResponseLanguage] = useState<string>('en-US');
-  const [selectedVoice, setSelectedVoice] = useState<string>('');
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>('');
   const [isLanguageModalOpen, setIsLanguageModalOpen] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -97,12 +108,19 @@ const App: React.FC = () => {
   // }, []); // Only run on mount
 
   // Cleanup speech on unmount
+  const stopSpeaking = useCallback(() => {
+    voiceService.stop();
+    setSpeakingMessageId(null);
+    setActiveSpeech(null);
+    setVoiceStatus('idle');
+  }, []);
+
   useEffect(() => {
     return () => {
-      voiceService.stop();
+      stopSpeaking();
       speechRecognitionService.stop();
     };
-  }, []);
+  }, [stopSpeaking]);
 
   // Listen for profile image changes
   useEffect(() => {
@@ -151,31 +169,47 @@ const App: React.FC = () => {
 
   // When language changes, check if selected voice matches the new language
   useEffect(() => {
-    if (selectedVoice && availableVoices.length > 0) {
-      const selectedVoiceObj = availableVoices.find(v => v.name === selectedVoice);
+    if (selectedVoiceId && availableVoices.length > 0) {
+      const selectedVoiceObj = availableVoices.find((voice) => voice.voiceURI === selectedVoiceId);
       if (selectedVoiceObj) {
-        const langPrefix = responseLanguage.split('-')[0];
-        // If selected voice doesn't match the new language, clear it to auto-select
-        if (!selectedVoiceObj.lang.startsWith(langPrefix) && selectedVoiceObj.lang !== responseLanguage) {
-          setSelectedVoice('');
+        const langPrefix = responseLanguage.split('-')[0].toLowerCase();
+        const selectedVoiceLang = selectedVoiceObj.lang.toLowerCase();
+        if (!selectedVoiceLang.startsWith(langPrefix) && selectedVoiceLang !== responseLanguage.toLowerCase()) {
+          setSelectedVoiceId('');
         }
       }
     }
-  }, [responseLanguage, availableVoices]); // Only check when language or voices change
+  }, [responseLanguage, selectedVoiceId, availableVoices]); // Only check when language or voices change
 
   const handleSpeak = (messageId: string, text: string) => {
-    if (speakingMessageId === messageId) {
-      // Stop speaking if already speaking this message
-      voiceService.stop();
-      setSpeakingMessageId(null);
-    } else {
-      // Stop any current speech and start new one
-      voiceService.stop();
-      setSpeakingMessageId(messageId);
-      voiceService.speak(text, () => {
-        setSpeakingMessageId(null);
-      }, responseLanguage, selectedVoice || undefined);
+    if (!voiceService.isAvailable()) {
+      alert("Voice playback isn't supported in this browser.");
+      return;
     }
+
+    if (speakingMessageId === messageId) {
+      stopSpeaking();
+      return;
+    }
+
+    stopSpeaking();
+    setVoiceStatus('starting');
+    setSpeakingMessageId(messageId);
+    setActiveSpeech({ id: messageId, text });
+
+    voiceService.speak(
+      text,
+      () => {
+        setVoiceStatus('idle');
+        setSpeakingMessageId((current) => (current === messageId ? null : current));
+        setActiveSpeech((current) => (current?.id === messageId ? null : current));
+      },
+      responseLanguage,
+      selectedVoiceId || undefined
+    );
+
+    // Move to playing state immediately after initiating speech
+    setVoiceStatus('playing');
   };
 
   const handleSendMessage = async (e?: React.FormEvent) => {
@@ -367,56 +401,36 @@ const App: React.FC = () => {
   const userPrompts = messages.filter((msg) => msg.role === 'user').length;
   const modelResponses = messages.filter((msg) => msg.role === 'model').length;
   const currentLanguage = LANGUAGE_OPTIONS.find((lang) => lang.code === responseLanguage)?.name || 'English';
-  const voiceLabel = selectedVoice || 'Auto voice';
+  const selectedVoice = useMemo(
+    () => availableVoices.find((voice) => voice.voiceURI === selectedVoiceId) || null,
+    [availableVoices, selectedVoiceId]
+  );
+  const filteredVoices = useMemo(
+    () => availableVoices.filter((voice) => {
+      const voiceName = voice.name.toLowerCase();
+      return voiceName.includes('microsoft david') || voiceName.includes('microsoft zira');
+    }),
+    [availableVoices]
+  );
+  const voiceLabel = selectedVoice?.name || 'Auto voice';
   const statusCopy = pdfFile
     ? 'Memory core engaged with your uploaded PDF context.'
     : 'Operating with default resume intelligence.';
-  const quickActions = [
-    {
-      id: 'memory',
-      title: pdfFile ? 'Refresh memory core' : 'Load persona PDF',
-      description: pdfFile ? 'Swap in a fresh data drop for deeper recall.' : 'Upload a PDF document to provide context.',
-      icon: FileIcon,
-      onClick: handleOpenUpload,
-    },
-    {
-      id: 'mic',
-      title: isRecording ? 'Stop live mic' : 'Start live mic',
-      description: isRecording ? 'Listening for your prompt…' : 'Speak instead of typing to drive the chat.',
-      icon: isRecording ? MicOffIcon : MicIcon,
-      onClick: handleToggleRecording,
-    },
-    {
-      id: 'language',
-      title: 'Response language',
-      description: currentLanguage,
-      icon: LanguageIcon,
-      onClick: () => setIsLanguageModalOpen(true),
-    },
-    {
-      id: 'voice',
-      title: 'Voice persona',
-      description: voiceLabel,
-      icon: VoiceIcon,
-      onClick: () => setIsVoiceModalOpen(true),
-    },
-  ];
-
   return (
     <div
       className="min-h-screen bg-black text-white font-sans"
       style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, sans-serif' }}
     >
-      <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-10">
-        <div className="grid gap-6 lg:grid-cols-[320px,minmax(0,1fr)]">
-          <aside>
+      <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 lg:py-12">
+        <div className="grid gap-8 lg:grid-cols-[320px,minmax(0,1fr)] items-stretch">
+          <aside className="flex">
             <ProfilePanel
-              className="shadow-[0_30px_100px_rgba(5,7,17,0.55)]"
+              className="shadow-sm w-full"
               onEditPersona={handleOpenUpload}
             />
           </aside>
 
-          <section className="relative flex min-h-[75vh] flex-col rounded-[40px] border border-orange-500/30 bg-gray-900 text-white shadow-[0_35px_120px_rgba(255,140,0,0.15)]">
+          <section className="relative flex min-h-[75vh] flex-col rounded-[32px] border border-orange-500/30 bg-gray-900 text-white shadow-[0_25px_80px_rgba(251,146,60,0.15)]">
             <header className="flex items-center justify-between px-6 sm:px-8 py-5 border-b border-orange-500/20">
               <div className="flex items-center gap-3">
                 <div className="relative">
@@ -434,11 +448,11 @@ const App: React.FC = () => {
                       </div>
                     )}
                   </div>
-                  <div className="absolute bottom-0 right-0 w-3 h-3 bg-orange-500 border-2 border-gray-900 rounded-full shadow-sm"></div>
+                  <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-400 border-2 border-white rounded-full shadow-sm"></div>
                 </div>
                 <div>
                   <h1 className="text-base font-semibold text-white">Praneeth's Assistant</h1>
-                  <p className="text-xs text-gray-400 flex items-center gap-1">
+                  <p className="text-xs text-orange-300 flex items-center gap-1">
                     {pdfFile ? (
                       <span className="text-orange-500 flex items-center gap-1">
                         <CheckIcon className="w-3 h-3"/> Memory Loaded
@@ -453,10 +467,10 @@ const App: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => setIsLanguageModalOpen(true)}
-                  className="flex items-center gap-2 px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm font-medium text-white rounded-lg border border-orange-500/30 transition-all shadow-sm hover:shadow-md group"
+                  className="flex items-center gap-2 px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm font-medium text-white rounded-full border border-orange-500/30 transition-all shadow-sm hover:shadow-md group"
                   title="Select response language"
                 >
-                  <LanguageIcon className="w-4 h-4 group-hover:text-orange-500" />
+                  <LanguageIcon className="w-4 h-4 text-orange-400 group-hover:text-orange-500" />
                   <span className="hidden sm:inline">
                     {LANGUAGE_OPTIONS.find(l => l.code === responseLanguage)?.name || 'Language'}
                   </span>
@@ -464,16 +478,16 @@ const App: React.FC = () => {
 
                 <button 
                   onClick={() => setIsVoiceModalOpen(true)}
-                  className="flex items-center gap-2 px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm font-medium text-white rounded-lg border border-orange-500/30 transition-all shadow-sm hover:shadow-md group"
+                  className="flex items-center gap-2 px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-sm font-medium text-white rounded-full border border-orange-500/30 transition-all shadow-sm hover:shadow-md group"
                   title="Select voice"
                 >
-                  <VoiceIcon className="w-4 h-4 group-hover:text-orange-500" />
+                  <VoiceIcon className="w-4 h-4 text-orange-400 group-hover:text-orange-500" />
                   <span className="hidden sm:inline">Voice</span>
                 </button>
               </div>
             </header>
 
-            <main className="flex-1 overflow-y-auto bg-gradient-to-b from-gray-900 to-black px-4 py-6 sm:px-8 lg:px-10">
+            <main className="flex-1 overflow-y-auto bg-gray-900 px-4 py-6 sm:px-8 lg:px-10">
               <div className="space-y-5">
                 {messages.map((msg) => {
                   const isUser = msg.role === 'user';
@@ -483,27 +497,27 @@ const App: React.FC = () => {
                       className={`flex items-start gap-4 ${isUser ? 'flex-row-reverse text-right' : 'text-left'}`}
                     >
                       <div
-                        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl shadow ${
-                          isUser ? 'bg-gradient-to-br from-orange-500 to-orange-600 text-white' : 'bg-gray-800 text-white'
+                        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl shadow-sm ${
+                          isUser ? 'bg-orange-500 text-white' : 'bg-gray-800 text-orange-400'
                         }`}
                       >
                         {isUser ? <UserIcon className="h-5 w-5" /> : <RobotIcon className="h-5 w-5" />}
                       </div>
                       <div
-                        className={`relative max-w-[80%] rounded-[28px] border p-5 text-sm leading-relaxed shadow-lg sm:max-w-[70%] ${
+                        className={`relative max-w-[80%] rounded-2xl border p-5 text-sm leading-relaxed shadow-sm sm:max-w-[70%] ${
                           isUser
-                            ? 'border-transparent bg-gradient-to-r from-orange-500 to-orange-600 text-white'
-                            : 'border-orange-500/20 bg-gray-800 text-white'
+                            ? 'border-orange-500/30 bg-orange-500/10 text-white'
+                            : 'border-orange-500/20 bg-gray-800 text-gray-200'
                         }`}
                       >
                         <p className="whitespace-pre-wrap">{msg.text}</p>
                         {!isUser && voiceService.isAvailable() && (
                           <button
                             onClick={() => handleSpeak(msg.id, msg.text)}
-                            className={`absolute -bottom-3 right-5 rounded-full border p-2 text-xs shadow transition ${
+                            className={`absolute -bottom-3 right-5 rounded-full border p-2 text-xs shadow-sm transition ${
                               speakingMessageId === msg.id
-                                ? 'border-orange-300 bg-orange-500 text-white'
-                                : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-orange-500 hover:text-orange-500'
+                                ? 'border-orange-500 bg-orange-500 text-white'
+                                : 'border-orange-500/30 bg-gray-800 text-orange-400 hover:border-orange-500 hover:text-orange-500'
                             }`}
                             title={speakingMessageId === msg.id ? 'Stop speaking' : 'Speak message'}
                           >
@@ -520,19 +534,19 @@ const App: React.FC = () => {
                 })}
 
                 {isLoading && (
-                  <div className="flex items-center gap-3 text-gray-400">
-                    <div className="h-10 w-10 rounded-2xl bg-gray-800 text-white shadow flex items-center justify-center">
+                  <div className="flex items-center gap-3 text-orange-400">
+                    <div className="h-10 w-10 rounded-2xl bg-gray-800 text-orange-400 shadow flex items-center justify-center">
                       <RobotIcon className="h-5 w-5" />
                     </div>
-                    <div className="rounded-[28px] border border-orange-500/20 bg-gray-800 px-4 py-3 shadow">
+                    <div className="rounded-2xl border border-orange-500/20 bg-gray-800 px-4 py-3 shadow-sm">
                       <div className="flex gap-2">
-                        <span className="h-2 w-2 animate-bounce rounded-full bg-slate-400" />
+                        <span className="h-2 w-2 animate-bounce rounded-full bg-orange-500" />
                         <span
-                          className="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                          className="h-2 w-2 animate-bounce rounded-full bg-orange-500"
                           style={{ animationDelay: '0.12s' }}
                         />
                         <span
-                          className="h-2 w-2 animate-bounce rounded-full bg-slate-400"
+                          className="h-2 w-2 animate-bounce rounded-full bg-orange-500"
                           style={{ animationDelay: '0.24s' }}
                         />
                       </div>
@@ -543,18 +557,17 @@ const App: React.FC = () => {
               </div>
             </main>
 
-            <footer className="border-t border-orange-500/20 bg-gray-900/90 px-4 py-6 sm:px-8 lg:px-10">
+            <footer className="border-t border-orange-500/20 bg-gray-900 px-4 py-6 sm:px-8 lg:px-10">
               <form onSubmit={handleSendMessage} className="group relative">
-                <div className="absolute inset-0 rounded-3xl bg-gradient-to-r from-orange-500/30 via-orange-600/20 to-orange-500/30 opacity-0 blur-xl transition group-focus-within:opacity-100" />
-                <div className="relative flex items-center gap-3 rounded-3xl border border-orange-500/30 bg-gray-800 px-4 py-2.5 shadow-xl">
+                <div className="relative flex items-center gap-3 rounded-full border border-orange-500/30 bg-[#202124] px-4 py-2.5 shadow-sm">
                   <button
                     type="button"
                     onClick={handleToggleRecording}
                     disabled={isLoading}
                     className={`flex-shrink-0 rounded-2xl border px-3 py-3 transition ${
                       isRecording
-                        ? 'border-red-500/50 bg-red-900/30 text-red-400 animate-pulse'
-                        : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-orange-500/50'
+                        ? 'border-red-500 bg-red-500/20 text-red-400 animate-pulse'
+                        : 'border-orange-500/30 bg-[#202124] text-orange-500 hover:border-orange-500'
                     } disabled:opacity-50`}
                     title={isRecording ? 'Stop recording' : 'Start voice input'}
                   >
@@ -564,20 +577,20 @@ const App: React.FC = () => {
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
-                    placeholder="Ask about me"
-                    className="w-full border-none bg-transparent text-base text-white placeholder-gray-500 focus:outline-none"
+                    placeholder="Ask about Praneeth"
+                    className="w-full border-none bg-transparent text-base text-white placeholder-orange-400/60 focus:outline-none"
                     disabled={isLoading || isRecording}
                   />
                   <button
                     type="submit"
                     disabled={!input.trim() || isLoading || isRecording}
-                    className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="flex h-11 w-11 items-center justify-center rounded-2xl bg-orange-600 text-gray-200 shadow-sm transition hover:bg-orange-700 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <SendIcon className="h-5 w-5" />
                   </button>
                 </div>
               </form>
-              <p className="mt-3 text-center text-xs text-gray-400">
+              <p className="mt-3 text-center text-xs text-orange-300/70">
                 Praneeth's Assistant can make mistakes. Verify important information.
               </p>
             </footer>
@@ -592,7 +605,7 @@ const App: React.FC = () => {
         title="Select Response Language"
       >
         <div className="space-y-4">
-          <p className="text-sm text-gray-300 text-center mb-4">
+          <p className="text-sm text-orange-300 text-center mb-4">
             Choose the language for AI responses and voice output
           </p>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-96 overflow-y-auto">
@@ -603,11 +616,11 @@ const App: React.FC = () => {
                   setResponseLanguage(lang.code);
                   setIsLanguageModalOpen(false);
                 }}
-                className={`
+                  className={`
                   px-4 py-3 rounded-lg border-2 transition-all text-sm font-medium
                   ${responseLanguage === lang.code
                     ? 'bg-orange-500 text-white border-orange-500 shadow-md'
-                    : 'bg-gray-800 text-white border-orange-500/30 hover:border-orange-500 hover:bg-gray-700'
+                    : 'bg-gray-800 text-white border-orange-500/30 hover:border-orange-500 hover:bg-orange-500/10'
                   }
                 `}
               >
@@ -625,47 +638,52 @@ const App: React.FC = () => {
         title="Select Voice"
       >
         <div className="space-y-4">
-          <p className="text-sm text-gray-300 text-center mb-4">
+          <p className="text-sm text-orange-300 text-center mb-4">
             Choose a voice for text-to-speech output
           </p>
           <div className="max-h-96 overflow-y-auto space-y-2">
             <button
               onClick={() => {
-                setSelectedVoice('');
+                setSelectedVoiceId('');
                 setIsVoiceModalOpen(false);
               }}
               className={`
                 w-full px-4 py-3 rounded-lg border-2 transition-all text-sm font-medium text-left
-                ${selectedVoice === ''
-                  ? 'bg-blue-500 text-white border-blue-500 shadow-md'
-                  : 'bg-white text-gray-700 border-gray-300 hover:border-blue-300 hover:bg-blue-50'
+                ${selectedVoiceId === ''
+                  ? 'bg-orange-500 text-white border-orange-500 shadow-md'
+                  : 'bg-gray-800 text-white border-orange-500/30 hover:border-orange-500 hover:bg-orange-500/10'
                 }
               `}
             >
               Auto (Default)
             </button>
+            {filteredVoices.length === 0 && availableVoices.length > 0 && (
+              <p className="text-sm text-orange-300 text-center py-4">
+                No Microsoft voices available. Please ensure Microsoft David or Microsoft Zira voices are installed.
+              </p>
+            )}
             {availableVoices.length === 0 && (
-              <p className="text-sm text-gray-500 text-center py-4">
+              <p className="text-sm text-orange-300 text-center py-4">
                 Loading voices...
               </p>
             )}
-            {availableVoices.map((voice) => (
+            {filteredVoices.map((voice) => (
               <button
                 key={voice.name}
                 onClick={() => {
-                  setSelectedVoice(voice.name);
+                  setSelectedVoiceId(voice.voiceURI);
                   setIsVoiceModalOpen(false);
                 }}
                 className={`
                   w-full px-4 py-3 rounded-lg border-2 transition-all text-sm font-medium text-left
-                  ${selectedVoice === voice.name
+                  ${selectedVoiceId === voice.voiceURI
                     ? 'bg-orange-500 text-white border-orange-500 shadow-md'
-                    : 'bg-gray-800 text-white border-orange-500/30 hover:border-orange-500 hover:bg-gray-700'
+                    : 'bg-gray-800 text-white border-orange-500/30 hover:border-orange-500 hover:bg-orange-500/10'
                   }
                 `}
               >
                 <div className="font-semibold">{voice.name}</div>
-                <div className={`text-xs mt-1 ${selectedVoice === voice.name ? 'text-orange-200' : 'text-gray-400'}`}>
+                <div className={`text-xs mt-1 ${selectedVoiceId === voice.voiceURI ? 'text-orange-100' : 'text-orange-300/70'}`}>
                   {voice.lang} {voice.default && '(Default)'}
                 </div>
               </button>
@@ -683,26 +701,26 @@ const App: React.FC = () => {
         {!isAuthenticated ? (
           <form onSubmit={handlePasswordSubmit} className="space-y-4">
             <div className="flex flex-col items-center justify-center mb-6">
-                <div className="p-4 bg-gray-100 rounded-full mb-3">
+                <div className="p-4 bg-gray-800 rounded-full mb-3">
                     <LockIcon className="w-8 h-8 text-orange-500" />
                 </div>
-                <p className="text-gray-600 text-center text-sm">Enter the secure password to upload new persona data.</p>
+                <p className="text-orange-300 text-center text-sm">Enter the secure password to upload new persona data.</p>
             </div>
             
             <div className="space-y-2">
-              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Password</label>
+              <label className="text-xs font-semibold text-orange-300 uppercase tracking-wider">Password</label>
               <input
                 type="password"
                 value={passwordInput}
                 onChange={(e) => setPasswordInput(e.target.value)}
-                className="w-full bg-gray-800 border border-orange-500/30 text-white rounded-lg px-4 py-3 focus:ring-2 focus:ring-orange-500/30 focus:outline-none focus:border-orange-500 shadow-sm"
+                className="w-full bg-gray-800 border border-orange-500/30 text-white rounded-lg px-4 py-3 focus:ring-2 focus:ring-orange-500 focus:outline-none focus:border-orange-500 shadow-sm"
                 placeholder="•••••••"
                 autoFocus
               />
             </div>
 
             {authError && (
-              <p className="text-red-600 text-sm font-medium bg-red-50 p-3 rounded-lg border border-red-200">
+              <p className="text-red-400 text-sm font-medium bg-red-500/20 p-3 rounded-lg border border-red-500/30">
                 {authError}
               </p>
             )}
@@ -721,14 +739,14 @@ const App: React.FC = () => {
                     <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mb-4">
                         <CheckIcon className="w-8 h-8" />
                     </div>
-                    <h4 className="text-lg font-bold text-gray-900">Upload Complete!</h4>
-                    <p className="text-gray-500 text-sm mt-1">Memory has been updated.</p>
+                    <h4 className="text-lg font-bold text-white">Upload Complete!</h4>
+                    <p className="text-orange-300 text-sm mt-1">Memory has been updated.</p>
                  </div>
             ) : (
                 <>
                     <div className="text-center">
-                        <h4 className="text-gray-900 font-medium mb-2">Upload Resume or Document</h4>
-                        <p className="text-sm text-gray-500 mb-6">
+                        <h4 className="text-white font-medium mb-2">Upload Resume or Document</h4>
+                        <p className="text-sm text-orange-300 mb-6">
                             Upload your resume, CV, or any document. The AI will use this to answer questions about the content.
                         </p>
                     </div>
@@ -750,7 +768,7 @@ const App: React.FC = () => {
                             }
                         }}
                         className={`
-                            border-2 border-dashed border-orange-500/30 hover:border-orange-500 hover:bg-orange-500/10 
+                            border-2 border-dashed border-orange-500/50 hover:border-orange-500 hover:bg-orange-500/20 
                             rounded-xl p-8 flex flex-col items-center justify-center cursor-pointer transition-all block
                             ${uploadStatus === 'processing' ? 'opacity-50 pointer-events-none' : ''}
                         `}
@@ -771,11 +789,11 @@ const App: React.FC = () => {
                             </div>
                         ) : (
                             <>
-                                <FileIcon className="w-12 h-12 text-gray-400 mb-4" />
-                                <span className="text-gray-700 font-medium text-base mb-1">Click to upload document</span>
-                                <span className="text-gray-500 text-xs">or drag and drop</span>
-                                <span className="text-gray-400 text-xs mt-2">All file types supported</span>
-                                <span className="text-gray-400 text-xs">Max size: 20MB</span>
+                                <FileIcon className="w-12 h-12 text-orange-400 mb-4" />
+                                <span className="text-white font-medium text-base mb-1">Click to upload document</span>
+                                <span className="text-orange-300 text-xs">or drag and drop</span>
+                                <span className="text-orange-300/70 text-xs mt-2">All file types supported</span>
+                                <span className="text-orange-300/70 text-xs">Max size: 20MB</span>
                             </>
                         )}
                     </label>
